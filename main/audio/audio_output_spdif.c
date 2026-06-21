@@ -349,3 +349,5 @@ uint32_t audio_output_get_hardware_latency_us(void) {
   const uint32_t audio_samples = DMA_BUF_COUNT * (SPDIF_BLOCK / SPDIF_BUF_DIV);
   return (uint32_t)((uint64_t)audio_samples * 1000000ULL / OUTPUT_RATE);
 }
+
+void audio_output_notify_ready(void) {}

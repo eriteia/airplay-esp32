@@ -213,3 +213,5 @@ uint32_t audio_output_get_hardware_latency_us(void) {
   // USB isochronous audio: ~2ms double-buffered endpoint latency.
   return 2000;
 }
+
+void audio_output_notify_ready(void) {}

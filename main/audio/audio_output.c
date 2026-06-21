@@ -61,6 +61,99 @@ static volatile int source_rate = 44100;
 static volatile bool resample_reinit_needed = false;
 static volatile audio_channel_mode_t channel_mode = AUDIO_CHANNEL_STEREO;
 
+// Ready chime: short three-note arpeggio (A4–C#5–E5) played once when the
+// device is ready to receive AirPlay connections.
+#define READY_CHIME_AMPLITUDE 1200
+#define READY_CHIME_NOTE_MS   85U
+#define READY_CHIME_GAP_MS    28U
+#define READY_CHIME_ATTACK_MS  8U
+#define READY_CHIME_RELEASE_MS 14U
+static const uint16_t READY_CHIME_FREQS_HZ[] = {440U, 554U, 659U};
+#define READY_CHIME_NOTE_COUNT \
+  (sizeof(READY_CHIME_FREQS_HZ) / sizeof(READY_CHIME_FREQS_HZ[0]))
+static volatile uint32_t ready_chime_note_samples = 0;
+static volatile uint32_t ready_chime_note_elapsed_samples = 0;
+static volatile uint32_t ready_chime_gap_samples = 0;
+static volatile uint32_t ready_chime_note_index = 0;
+static uint32_t ready_chime_phase = 0;
+static volatile bool ready_chime_log_pending = false;
+
+// Fill one I2S frame with the ready chime tone.  Returns true while the chime
+// is still playing, false when it is finished (caller should write silence).
+static bool fill_ready_chime(int16_t *out, size_t frame_samples) {
+  if (!out) {
+    return false;
+  }
+  if (ready_chime_log_pending) {
+    ESP_LOGI(TAG, "Playing ready chime");
+    ready_chime_log_pending = false;
+  }
+  if (ready_chime_note_index >= READY_CHIME_NOTE_COUNT &&
+      ready_chime_note_samples == 0 && ready_chime_gap_samples == 0) {
+    return false;
+  }
+  memset(out, 0, frame_samples * 2 * sizeof(int16_t));
+  const uint32_t attack_samples  = (OUTPUT_RATE * READY_CHIME_ATTACK_MS)  / 1000U;
+  const uint32_t release_samples = (OUTPUT_RATE * READY_CHIME_RELEASE_MS) / 1000U;
+  size_t pos = 0;
+  while (pos < frame_samples) {
+    if (ready_chime_note_samples == 0 && ready_chime_gap_samples == 0) {
+      if (ready_chime_note_index >= READY_CHIME_NOTE_COUNT) {
+        break;
+      }
+      ready_chime_note_samples = (OUTPUT_RATE * READY_CHIME_NOTE_MS) / 1000U;
+      if (ready_chime_note_samples == 0) {
+        ready_chime_note_samples = 1;
+      }
+      ready_chime_note_elapsed_samples = 0;
+    }
+    if (ready_chime_note_samples > 0) {
+      uint32_t freq = READY_CHIME_FREQS_HZ[ready_chime_note_index];
+      uint32_t phase_inc = (uint32_t)(((uint64_t)freq << 32) / OUTPUT_RATE);
+      uint32_t note_total = (OUTPUT_RATE * READY_CHIME_NOTE_MS) / 1000U;
+      if (note_total == 0) {
+        note_total = 1;
+      }
+      size_t chunk = frame_samples - pos;
+      if (chunk > ready_chime_note_samples) {
+        chunk = ready_chime_note_samples;
+      }
+      for (size_t i = 0; i < chunk; i++) {
+        ready_chime_phase += phase_inc;
+        int32_t amp = READY_CHIME_AMPLITUDE;
+        uint32_t elapsed = ready_chime_note_elapsed_samples;
+        uint32_t remain = (note_total > elapsed) ? (note_total - elapsed) : 0;
+        if (attack_samples > 0 && elapsed < attack_samples) {
+          amp = (amp * (int32_t)elapsed) / (int32_t)attack_samples;
+        }
+        if (release_samples > 0 && remain < release_samples) {
+          amp = (amp * (int32_t)remain) / (int32_t)release_samples;
+        }
+        int16_t s = (ready_chime_phase & 0x80000000U) ? (int16_t)amp : (int16_t)-amp;
+        out[(pos + i) * 2]     = s;
+        out[(pos + i) * 2 + 1] = s;
+        ready_chime_note_elapsed_samples++;
+      }
+      ready_chime_note_samples -= (uint32_t)chunk;
+      pos += chunk;
+      if (ready_chime_note_samples == 0) {
+        ready_chime_note_index++;
+        if (ready_chime_note_index < READY_CHIME_NOTE_COUNT) {
+          ready_chime_gap_samples = (OUTPUT_RATE * READY_CHIME_GAP_MS) / 1000U;
+        }
+      }
+      continue;
+    }
+    size_t chunk = frame_samples - pos;
+    if (chunk > ready_chime_gap_samples) {
+      chunk = ready_chime_gap_samples;
+    }
+    ready_chime_gap_samples -= (uint32_t)chunk;
+    pos += chunk;
+  }
+  return true;
+}
+
 static void apply_volume(int16_t *buf, size_t n) {
 #ifndef CONFIG_DAC_CONTROLS_VOLUME
   // Ramp toward the target gain instead of applying volume changes
@@ -157,13 +250,22 @@ static void playback_task(void *arg) {
                         &written, portMAX_DELAY);
       taskYIELD();
     } else {
-      // Receiver underflow — output a frame of silence.  Block on the DMA
-      // write (portMAX_DELAY) so the write itself paces the loop, instead of a
-      // short timeout plus vTaskDelay(1) which produced jittery silence.
-      led_audio_feed(silence, FRAME_SAMPLES);
-      i2s_channel_write(tx_handle, silence,
-                        (size_t)FRAME_SAMPLES * 2 * sizeof(int16_t), &written,
-                        portMAX_DELAY);
+      // Receiver underflow — output ready chime if active, otherwise silence.
+      // Block on the DMA write (portMAX_DELAY) so the write itself paces the
+      // loop, instead of a short timeout plus vTaskDelay(1) which produced
+      // jittery silence.
+      if (fill_ready_chime(pcm, FRAME_SAMPLES)) {
+        apply_volume(pcm, FRAME_SAMPLES * 2);
+        led_audio_feed(pcm, FRAME_SAMPLES);
+        i2s_channel_write(tx_handle, pcm,
+                          (size_t)FRAME_SAMPLES * 2 * sizeof(int16_t), &written,
+                          portMAX_DELAY);
+      } else {
+        led_audio_feed(silence, FRAME_SAMPLES);
+        i2s_channel_write(tx_handle, silence,
+                          (size_t)FRAME_SAMPLES * 2 * sizeof(int16_t), &written,
+                          portMAX_DELAY);
+      }
     }
   }
 
@@ -376,4 +478,13 @@ void audio_output_set_channel_mode(audio_channel_mode_t mode) {
 
 audio_channel_mode_t audio_output_get_channel_mode(void) {
   return channel_mode;
+}
+
+void audio_output_notify_ready(void) {
+  ready_chime_phase = 0;
+  ready_chime_note_samples = 0;
+  ready_chime_note_elapsed_samples = 0;
+  ready_chime_gap_samples = 0;
+  ready_chime_note_index = 0;
+  ready_chime_log_pending = true;
 }

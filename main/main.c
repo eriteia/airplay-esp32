@@ -76,6 +76,7 @@ static void start_airplay_services(void) {
   s_airplay_started = true;
   playback_control_set_source(PLAYBACK_SOURCE_AIRPLAY);
   ESP_LOGI(TAG, "AirPlay ready");
+  audio_output_notify_ready();
 }
 #ifdef CONFIG_BT_A2DP_ENABLE
 static void stop_airplay_services(void) {

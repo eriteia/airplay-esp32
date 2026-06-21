@@ -95,3 +95,9 @@ audio_channel_mode_t audio_output_get_channel_mode(void);
  * which case the mode is forced to STEREO and set/cycle are ignored.
  */
 bool audio_output_channel_mode_locked(void);
+
+/**
+ * Trigger a short ready-notification chime (three-note arpeggio).
+ * Called once when AirPlay services are fully up.
+ */
+void audio_output_notify_ready(void);
