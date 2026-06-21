@@ -90,15 +90,15 @@
 // or invalid anchor in a few seconds.
 #define MAX_CONSECUTIVE_EARLY 50
 
-// AV sync delay: hold every frame this many microseconds longer than its
-// anchor-scheduled time so that audio reaches the listener at the same moment
-// as a display that has a fixed video-processing pipeline delay.
-// A positive value delays audio (use when video is faster than audio).
-// Adjustable via Kconfig; set to 0 to disable.
+// A/V sync: delay audio so it matches a display with video-processing lag.
+// Edit AV_SYNC_DELAY_MS directly to tune — positive delays audio, 0 disables.
+// Kconfig (sdkconfig CONFIG_AIRPLAY_AV_SYNC_DELAY_MS) overrides this default.
 #ifndef CONFIG_AIRPLAY_AV_SYNC_DELAY_MS
-#define CONFIG_AIRPLAY_AV_SYNC_DELAY_MS 1750
+#define AV_SYNC_DELAY_MS CONFIG_AIRPLAY_AV_SYNC_DELAY_MS
+#else
+#define AV_SYNC_DELAY_MS 220
 #endif
-#define AV_SYNC_DELAY_US ((int64_t)CONFIG_AIRPLAY_AV_SYNC_DELAY_MS * 1000LL)
+#define AV_SYNC_DELAY_US ((int64_t)(AV_SYNC_DELAY_MS)*1000LL)
 
 static const char *TAG = "audio_time";
 // consecutive_early_frames is now a field in audio_timing_t so it resets
@@ -142,12 +142,11 @@ typedef enum {
 } sync_mode_t;
 
 // Compute how early (positive) or late (negative) a frame is in microseconds.
-// AV_SYNC_DELAY_US is added to make every frame appear that much more early,
-// causing the device to hold it longer and play it AV_SYNC_DELAY_US later.
+// apply_av_sync: true for realtime (video/mirror) streams, false for buffered.
 static bool compute_early_us(const audio_timing_t *timing,
                              const audio_format_t *format,
                              uint32_t rtp_timestamp, sync_mode_t sync_mode,
-                             int64_t *early_us) {
+                             bool apply_av_sync, int64_t *early_us) {
   if (!timing->anchor_valid || format->sample_rate <= 0) {
     return false;
   }
@@ -205,10 +204,12 @@ static bool compute_early_us(const audio_timing_t *timing,
       (int64_t)(audio_output_get_hardware_latency_us() + PIPELINE_LATENCY_US) *
       1000LL;
 
-  // A/V sync: shift the target forward by AV_SYNC_DELAY_US so the frame
-  // appears that much more early and is held in the pending slot until
-  // wall-clock reaches the delayed play time.
-  target_ns += AV_SYNC_DELAY_US * 1000LL;
+  // A/V sync: shift target forward so the frame is held AV_SYNC_DELAY_US
+  // longer before playing.  Only applied to realtime (video/mirror) streams —
+  // buffered music streams have no video to sync with.
+  if (apply_av_sync) {
+    target_ns += AV_SYNC_DELAY_US * 1000LL;
+  }
 
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
   *early_us = (target_ns - now_ns) / 1000LL;
@@ -646,10 +647,11 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
       }
     }
 
+    bool is_video_stream = !audio_stream_uses_buffer(stream->type);
     if (timing->anchor_valid && format->sample_rate > 0) {
       int64_t early_us = 0;
       if (compute_early_us(timing, format, hdr->rtp_timestamp, sync_mode,
-                           &early_us)) {
+                           is_video_stream, &early_us)) {
         // Hold-release point.  A FRESH frame is shelved as pending when it
         // is more than the (wide, jitter-hysteresis) threshold early.  But a
         // frame ALREADY pending is re-checked once per frame period (~8 ms),
@@ -789,7 +791,7 @@ size_t audio_timing_read(audio_timing_t *timing, audio_buffer_t *buffer,
         timing->playout_started) {
       int64_t on_time_err_us = 0;
       if (compute_early_us(timing, format, played_rtp_timestamp, sync_mode,
-                           &on_time_err_us)) {
+                           is_video_stream, &on_time_err_us)) {
         //   err      — distance from this frame's scheduled play time
         //              (anchor + stream playout latency).  Should sit near 0.
         //   buffered — frames still queued behind this one.

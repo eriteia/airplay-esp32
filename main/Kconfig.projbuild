@@ -463,7 +463,7 @@ menu "Airplay ESP Configuration"
 
         config AIRPLAY_AV_SYNC_DELAY_MS
             int "A/V sync delay: delay audio to match display latency (ms)"
-            default 1750
+            default 220
             range 0 5000
             help
                 Adds a fixed delay to audio output so it arrives at the
