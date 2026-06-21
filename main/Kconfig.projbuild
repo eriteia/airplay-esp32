@@ -461,6 +461,17 @@ menu "Airplay ESP Configuration"
                 the cost of slightly looser sync. Increase this if you still
                 hear drop-outs on AirPlay 1 / realtime playback.
 
+        config AIRPLAY_AV_SYNC_DELAY_MS
+            int "A/V sync delay: delay audio to match display latency (ms)"
+            default 1750
+            range 0 5000
+            help
+                Adds a fixed delay to audio output so it arrives at the
+                listener at the same time as a display with a video-processing
+                pipeline delay.  Set to the measured display lag in
+                milliseconds (0 to disable).  The default 1750 ms matches a
+                typical TV with roughly 1.75 s of video-processing delay.
+
         config ENABLE_AIRPLAY_ARTWORK
             bool "Enable cover-art / artwork reception"
             default n

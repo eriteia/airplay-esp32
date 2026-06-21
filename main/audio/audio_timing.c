@@ -90,6 +90,16 @@
 // or invalid anchor in a few seconds.
 #define MAX_CONSECUTIVE_EARLY 50
 
+// AV sync delay: hold every frame this many microseconds longer than its
+// anchor-scheduled time so that audio reaches the listener at the same moment
+// as a display that has a fixed video-processing pipeline delay.
+// A positive value delays audio (use when video is faster than audio).
+// Adjustable via Kconfig; set to 0 to disable.
+#ifndef CONFIG_AIRPLAY_AV_SYNC_DELAY_MS
+#define CONFIG_AIRPLAY_AV_SYNC_DELAY_MS 1750
+#endif
+#define AV_SYNC_DELAY_US ((int64_t)CONFIG_AIRPLAY_AV_SYNC_DELAY_MS * 1000LL)
+
 static const char *TAG = "audio_time";
 // consecutive_early_frames is now a field in audio_timing_t so it resets
 // automatically whenever a new anchor is set.
@@ -131,7 +141,9 @@ typedef enum {
   SYNC_MODE_NTP,  // AirPlay 1 NTP sync
 } sync_mode_t;
 
-// Compute how early (positive) or late (negative) a frame is in microseconds
+// Compute how early (positive) or late (negative) a frame is in microseconds.
+// AV_SYNC_DELAY_US is added to make every frame appear that much more early,
+// causing the device to hold it longer and play it AV_SYNC_DELAY_US later.
 static bool compute_early_us(const audio_timing_t *timing,
                              const audio_format_t *format,
                              uint32_t rtp_timestamp, sync_mode_t sync_mode,
@@ -192,6 +204,11 @@ static bool compute_early_us(const audio_timing_t *timing,
   target_ns -=
       (int64_t)(audio_output_get_hardware_latency_us() + PIPELINE_LATENCY_US) *
       1000LL;
+
+  // A/V sync: shift the target forward by AV_SYNC_DELAY_US so the frame
+  // appears that much more early and is held in the pending slot until
+  // wall-clock reaches the delayed play time.
+  target_ns += AV_SYNC_DELAY_US * 1000LL;
 
   int64_t now_ns = (int64_t)esp_timer_get_time() * 1000LL;
   *early_us = (target_ns - now_ns) / 1000LL;
